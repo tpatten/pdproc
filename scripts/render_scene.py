@@ -96,6 +96,10 @@ import argparse
 
 import logging
 
+from subprocess import call
+import os
+import subprocess
+
 
 # setup logging
 log = logging.getLogger('contact_annotation')
@@ -109,6 +113,11 @@ ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.DEBUG)
 ch.setFormatter(formatter)
 log.addHandler(ch)
+
+# parameters for PushNet
+pushnet_width = 128
+pushnet_height = 106
+pushnet_scale = 3
 
 # lots of shader code for OpenGL
 SCENE_VS_SHADER = \
@@ -337,7 +346,7 @@ class Scene:
         if 'shadows' in param.keys():
             self.shadows = param['shadows']
         else:
-            self.shadows =True
+            self.shadows = False
 
         # init a glut window as context
         glut.glutInit(sys.argv)
@@ -409,7 +418,8 @@ class Scene:
         self.z_near = 0.05
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDepthFunc(gl.GL_LEQUAL)
-        gl.glClearColor(0.1, 0.2, 0.3, 1.0)
+        #gl.glClearColor(0.1, 0.2, 0.3, 1.0)
+        gl.glClearColor(1., 1., 1., 1.0)
 
         # initialize the shaders
         if self.shadows:
@@ -788,14 +798,21 @@ class Scene:
         model = gl.glGetFloatv(gl.GL_MODELVIEW_MATRIX)
         shader.set_value("model", model)
         obj = self.objects[self.object_keys[object_shape]]
-        obj.draw(shader, texture_object, shader.id == self.scene_shader.id)
+        if tip is not None:
+          obj.draw(shader, texture_object, shader.id == self.scene_shader.id)
+        else:
+          obj.draw(shader, 'black', shader.id == self.scene_shader.id)
         gl.glPopMatrix()
 
         # draw the tip if it is given
         if tip is not None:
+            #print tip
             gl.glTranslatef(tip[0], 0, tip[1])
+            #print tip
             tip_obj = self.objects[self.object_keys['tip']]
+            #print tip_obj
             model = gl.glGetFloatv(gl.GL_MODELVIEW_MATRIX)
+            #print model
             shader.set_value("model", model)
             tip_obj.draw(shader, 'brushed_metal',
                          shader.id == self.scene_shader.id)
@@ -922,6 +939,24 @@ class Scene:
             gl.glDisableClientState(gl.GL_NORMAL_ARRAY)
             gl.glDisableClientState(gl.GL_TEXTURE_COORD_ARRAY)
 
+def crop_image(input_name, output_name):
+  # image, crop- dimensions
+  # arrange the output file's name and path
+  img_base = input_name[:input_name.rfind(".")]
+  extension = input_name[input_name.rfind("."):]
+  path = input_name[:input_name.rfind("/")]
+  # get the current img' size
+  data = subprocess.check_output(["identify", input_name]).decode("utf-8").strip().replace(input_name, "")
+  size = [int(n) for n in data.replace(input_name, "").split()[1].split("x")]
+  # set the crop values for pushnet resizing
+  # calculate the command to resize
+  #w = size[0]-left-right; h = size[1]-top-bottom; x = left; y = top
+  w = pushnet_width*pushnet_scale; h = pushnet_height*pushnet_scale
+  x = (size[0]-pushnet_width*pushnet_scale)/2; y = (size[1]-pushnet_height*pushnet_scale)/2
+  # execute the command
+  cmd = ["convert", input_name, "-crop", str(w)+"x"+str(h)+"+"+str(x)+"+"+str(y), "+repage", output_name]
+  subprocess.Popen(cmd)
+
 
 def demo(argv=None):
     """
@@ -945,7 +980,7 @@ def demo(argv=None):
                                              '../resources'),
                         help='where to find textures etc')
     parser.add_argument('--shadows', dest='shadows', type=str,
-                        default=True, help='render with shadows?')
+                        default=False, help='render with shadows?')
 
     args = parser.parse_args(argv)
 
@@ -961,6 +996,9 @@ def demo(argv=None):
     obs = ['rect1']
     surfaces = ['abs']
 
+    width = 640
+    height = 480
+
     plt.ioff()
     for o in obs:
         # chose a random surface
@@ -970,63 +1008,170 @@ def demo(argv=None):
 
         # chose a random data-file
         fs = [os.path.join(path, f) for f in os.listdir(path)]
-        filename = fs[np.random.randint(len(fs))]
+        print len(fs)
+        for f in xrange(1,len(fs)):
+          filename = fs[f]
+          print filename
+          #filename = fs[np.random.randint(len(fs))]
 
-        # sample a random camera position
-        tilt = np.random.ranf() - 0.5
-        if tilt > 0:
-            camera_pos = (np.random.ranf(size=(3)) - 0.5) / 2.
-        else:
-            camera_pos = np.zeros(3)
-        camera_pos[2] = 0.3 + np.random.ranf() * 0.6
-        ps.set_camera(camera_pos)
+          # sample a random camera position
+          tilt = np.random.ranf() - 0.5
+          #tilt = 0
+          if tilt > 0:
+              camera_pos = (np.random.ranf(size=(3)) - 0.5) / 2.
+          else:
+              camera_pos = np.zeros(3)
+          camera_pos[2] = 0.3 + np.random.ranf() * 0.6
+          ps.set_camera(camera_pos)
 
-        # sample a random offset for the object
-        off = ((np.random.ranf(2) - 0.5) / 5.) * camera_pos[2]
+          # sample a random offset for the object
+          off = ((np.random.ranf(2) - 0.5) / 5.) * camera_pos[2]
+          #off = np.zeros(2)
 
-        # sample a random light position
-        light = (np.random.ranf(size=(3)) - 0.5) * 2
-        light[2] = max(np.random.ranf()*1.5, 0.3)
+          # sample a random light position
+          light = (np.random.ranf(size=(3)) - 0.5) * 2
+          light[2] = max(np.random.ranf()*1.5, 0.3)
 
-        # load the data
-        try:
-            data_in = h5py.File(filename, "r", driver='core')
-            data = {}
-            for key, val in data_in.iteritems():
-                data[key] = val.value
-        except:
-            log.error('Could not load '+ filename)
-            return
+          # load the data
+          try:
+              data_in = h5py.File(filename, "r", driver='core')
+              data = {}
+              for key, val in data_in.iteritems():
+                  data[key] = val.value
+          except:
+              log.error('Could not load '+ filename)
+              return
 
-        # render and save an image of the scene every 10 steps
-        for ind in np.arange(len(data['object']))[::10]:
-            pos = data["object"][ind]
-            tip = data['tip'][ind] + off
+          # render and save an image of the scene every 10 steps
+          first_tip_ix = (0, 0)
+          #prev_ix = (0, 0)
+          curr_ix = (0, 0)
+          im_first = None
+          d_first = None
+          im_last = None
+          d_last = None
+          d_length = len(data['object'])
+          #for ind in np.arange(len(data['object']))[::10]:
+          for ind in np.arange(len(data['object']))[::d_length-1]:
+              print ind
+              pos = data["object"][ind]
+              tip = data['tip'][ind] + off
 
-            tr = pos[:2] + off
-            rot = pos[2]
+              tr = pos[:2] + off
+              rot = pos[2]
 
-            # render the scene
-            im, d = ps.draw(tr, rot * 180. / np.pi, s, o, tip=tip,
-                            light_pos=light)
+              # render the scene
+              im, d = ps.draw(tr, rot * 180. / np.pi, s, o, tip=tip,
+                              light_pos=light)
 
-            # plot and save
-            fig, ax = plt.subplots(2, figsize=(8, 13))
-            ax[0].imshow(im)
-            ax[0].set_ylim([0, 480])
-            ax[0].set_xlim([0, 640])
-            ax[1].imshow(d.reshape(480, 640), cmap='gray', vmin=0.2, vmax=1.)
-            ax[1].set_ylim([0, 480])
-            ax[1].set_xlim([0, 640])
-            # hide the ticks but keep the axis as frame
-            ax[0].get_xaxis().set_ticks([])
-            ax[0].get_yaxis().set_ticks([])
-            ax[1].get_xaxis().set_ticks([])
-            ax[1].get_yaxis().set_ticks([])
-            name = s + '_' + o + '_' + str(ind) + ".jpg"
-            fig.tight_layout()
-            plt.savefig(os.path.join(args.out_dir, name), dpi=90)
-            plt.close(fig)
+              curr_ix = np.unravel_index(np.argmin(im, axis=None), im.shape)
+              circle_color = 'g'
+              if curr_ix[0] == 0 and curr_ix[0] == 0:
+                print 'ERROR could not detect tip'
+                break
+              elif ind == 0:
+                first_tip_ix = curr_ix
+
+              '''
+              if curr_ix[0] == 0 and curr_ix[0] == 0:
+                curr_ix = prev_ix
+                circle_color = 'r'
+              else:
+                prev_ix = curr_ix
+                if first_tip_ix[0] == 0 and first_tip_ix[0] == 0:
+                  first_tip_ix = curr_ix
+              '''
+
+              # re-render the scene
+              im, d = ps.draw(tr, rot * 180. / np.pi, s, o, tip=None,
+                              light_pos=light)
+              if ind == 0:
+                im_first = im
+                d_first = d
+              else:
+                im_last = im
+                d_last = d
+
+              # plot and save
+              '''
+              fig, ax = plt.subplots(2, figsize=(8, 13))
+              ax[0].imshow(im)
+              circle1 = plt.Circle((curr_ix[1], curr_ix[0]), 4.0, color=circle_color)
+              ax[0].add_artist(circle1)
+              ax[0].set_ylim([0, height])
+              ax[0].set_xlim([0, width])
+              ax[1].imshow(d.reshape(height, width), cmap='gray', vmin=0.2, vmax=1.)
+              circle2 = plt.Circle((curr_ix[1], curr_ix[0]), 4.0, color=circle_color)
+              ax[1].add_artist(circle2)
+              ax[1].set_ylim([0, height])
+              ax[1].set_xlim([0, width])
+              # hide the ticks but keep the axis as frame
+              ax[0].get_xaxis().set_ticks([])
+              ax[0].get_yaxis().set_ticks([])
+              ax[1].get_xaxis().set_ticks([])
+              ax[1].get_yaxis().set_ticks([])
+              name = s + '_' + o + '_' + str(ind) + ".jpg"
+              fig.tight_layout()
+              plt.savefig(os.path.join(args.out_dir, name), dpi=90)
+              plt.close(fig)
+              '''
+              if ind >= 200:
+                break
+          # plot and save first and last images
+          my_dpi = 90
+          for i in range(0,2):
+            name1 = str(f) + '_' + s + '_' + o + '_pn_' + str(i) + '.jpg'
+            name2 = str(f) + '_' + s + '_' + o + '_' + str(i) + '.jpg'
+            im = None
+            if i == 0:
+              im = im_first
+            else:
+              im = im_last
+            temp_filename = os.path.join(args.out_dir, "temp.jpg")
+            pushnet_filename = os.path.join(args.out_dir, name1)
+            plt.imshow(im)
+            plt.ylim([0, height])
+            plt.xlim([0, width])
+            plt.axis('off')
+            plt.tight_layout()
+            plt.savefig(temp_filename)
+            #plt.clf()
+            plt.imshow(im)
+            plt.plot([first_tip_ix[1], curr_ix[1]], [first_tip_ix[0], curr_ix[0]], 'g-', linewidth=4.0)
+            plt.plot([first_tip_ix[1]], [first_tip_ix[0]], '8g')
+            plt.savefig(os.path.join(args.out_dir, name2))
+            plt.clf()
+            crop_image(temp_filename, pushnet_filename)
+            cmd = ["convert -resize 128X106!", pushnet_filename, pushnet_filename]
+            os.system(' '.join(cmd))
+            cmd = ["convert -negate", pushnet_filename, pushnet_filename]
+            os.system(' '.join(cmd))
+            cmd = ["rm -rf", temp_filename]
+            os.system(' '.join(cmd))
+            push_vec_filename = str(f) + '_' + s + '_' + o + '_push.txt'
+            file = open(os.path.join(args.out_dir, push_vec_filename), "w") 
+            file.write(' '.join([str(first_tip_ix[1]), str(first_tip_ix[0]), str(curr_ix[1]), str(curr_ix[0])])) 
+            file.close()
+            im_data = subprocess.check_output(["identify", pushnet_filename]).decode("utf-8").strip().replace(pushnet_filename, "")
+            size = [int(n) for n in im_data.replace(pushnet_filename, "").split()[1].split("x")]
+            if not size[0] == pushnet_width or not size[1] == pushnet_height:
+              print 'ERROR: ' + pushnet_filename
+              print i
+              cmd = ["rm -rf", pushnet_filename]
+              os.system(' '.join(cmd))
+              cmd = ["rm -rf", os.path.join(args.out_dir, name2)]
+              os.system(' '.join(cmd))
+              cmd = ["rm -rf", os.path.join(args.out_dir, push_vec_filename)]
+              os.system(' '.join(cmd))
+              if i == 1:
+                name1 = str(f) + '_' + s + '_' + o + '_pn_0.jpg'
+                cmd = ["rm -rf", os.path.join(args.out_dir, name1)]
+                os.system(' '.join(cmd))
+                name2 = str(f) + '_' + s + '_' + o + '_0.jpg'
+                cmd = ["rm -rf", os.path.join(args.out_dir, name2)]
+                os.system(' '.join(cmd))
+              #raw_input("Press Enter to continue...")
+              break
     ps.close()
 
 if __name__ == "__main__":
